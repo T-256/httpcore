@@ -221,79 +221,75 @@ class AsyncSocks5Connection(AsyncConnectionInterface):
 
         async with self._connect_lock:
             if self._connection is None:
-                try:
-                    # Connect to the proxy
+                # Connect to the proxy
+                kwargs = {
+                    "host": self._proxy_origin.host.decode("ascii"),
+                    "port": self._proxy_origin.port,
+                    "timeout": timeout,
+                }
+                with Trace("connect_tcp", logger, request, kwargs) as trace:
+                    stream = await self._network_backend.connect_tcp(**kwargs)
+                    trace.return_value = stream
+
+                # Connect to the remote host using socks5
+                kwargs = {
+                    "stream": stream,
+                    "host": self._remote_origin.host.decode("ascii"),
+                    "port": self._remote_origin.port,
+                    "auth": self._proxy_auth,
+                }
+                with Trace(
+                    "setup_socks5_connection", logger, request, kwargs
+                ) as trace:
+                    await _init_socks5_connection(**kwargs)
+                    trace.return_value = stream
+
+                # Upgrade the stream to SSL
+                if self._remote_origin.scheme == b"https":
+                    ssl_context = (
+                        default_ssl_context()
+                        if self._ssl_context is None
+                        else self._ssl_context
+                    )
+                    alpn_protocols = (
+                        ["http/1.1", "h2"] if self._http2 else ["http/1.1"]
+                    )
+                    ssl_context.set_alpn_protocols(alpn_protocols)
+
                     kwargs = {
-                        "host": self._proxy_origin.host.decode("ascii"),
-                        "port": self._proxy_origin.port,
+                        "ssl_context": ssl_context,
+                        "server_hostname": sni_hostname
+                        or self._remote_origin.host.decode("ascii"),
                         "timeout": timeout,
                     }
-                    with Trace("connect_tcp", logger, request, kwargs) as trace:
-                        stream = await self._network_backend.connect_tcp(**kwargs)
+                    async with Trace("start_tls", logger, request, kwargs) as trace:
+                        stream = await stream.start_tls(**kwargs)
                         trace.return_value = stream
 
-                    # Connect to the remote host using socks5
-                    kwargs = {
-                        "stream": stream,
-                        "host": self._remote_origin.host.decode("ascii"),
-                        "port": self._remote_origin.port,
-                        "auth": self._proxy_auth,
-                    }
-                    with Trace(
-                        "setup_socks5_connection", logger, request, kwargs
-                    ) as trace:
-                        await _init_socks5_connection(**kwargs)
-                        trace.return_value = stream
+                # Determine if we should be using HTTP/1.1 or HTTP/2
+                ssl_object = stream.get_extra_info("ssl_object")
+                http2_negotiated = (
+                    ssl_object is not None
+                    and ssl_object.selected_alpn_protocol() == "h2"
+                )
 
-                    # Upgrade the stream to SSL
-                    if self._remote_origin.scheme == b"https":
-                        ssl_context = (
-                            default_ssl_context()
-                            if self._ssl_context is None
-                            else self._ssl_context
-                        )
-                        alpn_protocols = (
-                            ["http/1.1", "h2"] if self._http2 else ["http/1.1"]
-                        )
-                        ssl_context.set_alpn_protocols(alpn_protocols)
+                # Create the HTTP/1.1 or HTTP/2 connection
+                if http2_negotiated or (
+                    self._http2 and not self._http1
+                ):  # pragma: nocover
+                    from .http2 import AsyncHTTP2Connection
 
-                        kwargs = {
-                            "ssl_context": ssl_context,
-                            "server_hostname": sni_hostname
-                            or self._remote_origin.host.decode("ascii"),
-                            "timeout": timeout,
-                        }
-                        async with Trace("start_tls", logger, request, kwargs) as trace:
-                            stream = await stream.start_tls(**kwargs)
-                            trace.return_value = stream
-
-                    # Determine if we should be using HTTP/1.1 or HTTP/2
-                    ssl_object = stream.get_extra_info("ssl_object")
-                    http2_negotiated = (
-                        ssl_object is not None
-                        and ssl_object.selected_alpn_protocol() == "h2"
+                    self._connection = AsyncHTTP2Connection(
+                        origin=self._remote_origin,
+                        stream=stream,
+                        keepalive_expiry=self._keepalive_expiry,
                     )
-
-                    # Create the HTTP/1.1 or HTTP/2 connection
-                    if http2_negotiated or (
-                        self._http2 and not self._http1
-                    ):  # pragma: nocover
-                        from .http2 import AsyncHTTP2Connection
-
-                        self._connection = AsyncHTTP2Connection(
-                            origin=self._remote_origin,
-                            stream=stream,
-                            keepalive_expiry=self._keepalive_expiry,
-                        )
-                    else:
-                        self._connection = AsyncHTTP11Connection(
-                            origin=self._remote_origin,
-                            stream=stream,
-                            keepalive_expiry=self._keepalive_expiry,
-                        )
-                except Exception as exc:
-                    self._connect_failed = True
-                    raise exc
+                else:
+                    self._connection = AsyncHTTP11Connection(
+                        origin=self._remote_origin,
+                        stream=stream,
+                        keepalive_expiry=self._keepalive_expiry,
+                    )
             elif not self._connection.is_available():  # pragma: nocover
                 raise ConnectionNotAvailable()
 

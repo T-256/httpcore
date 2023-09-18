@@ -14,6 +14,8 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+from ._synchronization import AsyncShieldCancellation
+
 # Functions for typechecking...
 
 
@@ -470,8 +472,17 @@ class Response:
                 "more than once."
             )
         self._stream_consumed = True
-        async for chunk in self.stream:
-            yield chunk
+        try:
+            async for chunk in self.stream:
+                yield chunk
+        except BaseException as exc:
+            if hasattr(self.stream, "aclose"):
+                # If we get an exception while streaming the response,
+                # we want to close the response (and possibly the connection)
+                # before raising that exception.
+                with AsyncShieldCancellation():
+                    await self.stream.aclose()
+                raise exc
 
     async def aclose(self) -> None:
         if not isinstance(self.stream, AsyncIterable):  # pragma: nocover

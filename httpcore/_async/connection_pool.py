@@ -229,17 +229,8 @@ class AsyncConnectionPool(AsyncRequestInterface):
         while True:
             timeouts = request.extensions.get("timeout", {})
             timeout = timeouts.get("pool", None)
-            try:
-                connection = await status.wait_for_connection(timeout=timeout)
-            except BaseException as exc:
-                # If we timeout here, or if the task is cancelled, then make
-                # sure to remove the request from the queue before bubbling
-                # up the exception.
-                async with self._pool_lock:
-                    # Ensure only remove when task exists.
-                    if status in self._requests:
-                        self._requests.remove(status)
-                    raise exc
+
+            connection = await status.wait_for_connection(timeout=timeout)
 
             try:
                 response = await connection.handle_async_request(request)
@@ -256,10 +247,6 @@ class AsyncConnectionPool(AsyncRequestInterface):
                     # status so that the request becomes queued again.
                     status.unset_connection()
                     await self._attempt_to_acquire_connection(status)
-            except BaseException as exc:
-                with AsyncShieldCancellation():
-                    await self.response_closed(status)
-                raise exc
             else:
                 break
 

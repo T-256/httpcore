@@ -68,6 +68,15 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             max_incomplete_event_size=self.MAX_INCOMPLETE_EVENT_SIZE,
         )
 
+    async def _cleanup(self, request: Request, exc: BaseException) -> BaseException:
+        exc = super()._cleanup(request, exc)
+
+        with AsyncShieldCancellation():
+            async with Trace("response_closed", logger, request) as trace:
+                await self._response_closed()
+
+        return exc
+
     async def handle_async_request(self, request: Request) -> Response:
         if not self.can_handle_request(request.url.origin):
             raise RuntimeError(
@@ -83,54 +92,48 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             else:
                 raise ConnectionNotAvailable()
 
+        kwargs = {"request": request}
         try:
-            kwargs = {"request": request}
-            try:
-                async with Trace(
-                    "send_request_headers", logger, request, kwargs
-                ) as trace:
-                    await self._send_request_headers(**kwargs)
-                async with Trace("send_request_body", logger, request, kwargs) as trace:
-                    await self._send_request_body(**kwargs)
-            except WriteError:
-                # If we get a write error while we're writing the request,
-                # then we supress this error and move on to attempting to
-                # read the response. Servers can sometimes close the request
-                # pre-emptively and then respond with a well formed HTTP
-                # error response.
-                pass
-
             async with Trace(
-                "receive_response_headers", logger, request, kwargs
+                "send_request_headers", logger, request, kwargs
             ) as trace:
-                (
-                    http_version,
-                    status,
-                    reason_phrase,
-                    headers,
-                ) = await self._receive_response_headers(**kwargs)
-                trace.return_value = (
-                    http_version,
-                    status,
-                    reason_phrase,
-                    headers,
-                )
+                await self._send_request_headers(**kwargs)
+            async with Trace("send_request_body", logger, request, kwargs) as trace:
+                await self._send_request_body(**kwargs)
+        except WriteError:
+            # If we get a write error while we're writing the request,
+            # then we supress this error and move on to attempting to
+            # read the response. Servers can sometimes close the request
+            # pre-emptively and then respond with a well formed HTTP
+            # error response.
+            pass
 
-            return Response(
-                status=status,
-                headers=headers,
-                content=HTTP11ConnectionByteStream(self, request),
-                extensions={
-                    "http_version": http_version,
-                    "reason_phrase": reason_phrase,
-                    "network_stream": self._network_stream,
-                },
+        async with Trace(
+            "receive_response_headers", logger, request, kwargs
+        ) as trace:
+            (
+                http_version,
+                status,
+                reason_phrase,
+                headers,
+            ) = await self._receive_response_headers(**kwargs)
+            trace.return_value = (
+                http_version,
+                status,
+                reason_phrase,
+                headers,
             )
-        except BaseException as exc:
-            with AsyncShieldCancellation():
-                async with Trace("response_closed", logger, request) as trace:
-                    await self._response_closed()
-            raise exc
+
+        return Response(
+            status=status,
+            headers=headers,
+            content=HTTP11ConnectionByteStream(self, request),
+            extensions={
+                "http_version": http_version,
+                "reason_phrase": reason_phrase,
+                "network_stream": self._network_stream,
+            },
+        )
 
     # Sending the request...
 
@@ -324,17 +327,11 @@ class HTTP11ConnectionByteStream:
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         kwargs = {"request": self._request}
-        try:
-            async with Trace("receive_response_body", logger, self._request, kwargs):
-                async for chunk in self._connection._receive_response_body(**kwargs):
-                    yield chunk
-        except BaseException as exc:
-            # If we get an exception while streaming the response,
-            # we want to close the response (and possibly the connection)
-            # before raising that exception.
-            with AsyncShieldCancellation():
-                await self.aclose()
-            raise exc
+
+        async with Trace("receive_response_body", logger, self._request, kwargs):
+            async for chunk in self._connection._receive_response_body(**kwargs):
+                yield chunk
+
 
     async def aclose(self) -> None:
         if not self._closed:

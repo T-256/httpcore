@@ -72,31 +72,27 @@ class AsyncHTTPConnection(AsyncConnectionInterface):
 
         async with self._request_lock:
             if self._connection is None:
-                try:
-                    stream = await self._connect(request)
+                stream = await self._connect(request)
 
-                    ssl_object = stream.get_extra_info("ssl_object")
-                    http2_negotiated = (
-                        ssl_object is not None
-                        and ssl_object.selected_alpn_protocol() == "h2"
+                ssl_object = stream.get_extra_info("ssl_object")
+                http2_negotiated = (
+                    ssl_object is not None
+                    and ssl_object.selected_alpn_protocol() == "h2"
+                )
+                if http2_negotiated or (self._http2 and not self._http1):
+                    from .http2 import AsyncHTTP2Connection
+
+                    self._connection = AsyncHTTP2Connection(
+                        origin=self._origin,
+                        stream=stream,
+                        keepalive_expiry=self._keepalive_expiry,
                     )
-                    if http2_negotiated or (self._http2 and not self._http1):
-                        from .http2 import AsyncHTTP2Connection
-
-                        self._connection = AsyncHTTP2Connection(
-                            origin=self._origin,
-                            stream=stream,
-                            keepalive_expiry=self._keepalive_expiry,
-                        )
-                    else:
-                        self._connection = AsyncHTTP11Connection(
-                            origin=self._origin,
-                            stream=stream,
-                            keepalive_expiry=self._keepalive_expiry,
-                        )
-                except Exception as exc:
-                    self._connect_failed = True
-                    raise exc
+                else:
+                    self._connection = AsyncHTTP11Connection(
+                        origin=self._origin,
+                        stream=stream,
+                        keepalive_expiry=self._keepalive_expiry,
+                    )
             elif not self._connection.is_available():
                 raise ConnectionNotAvailable()
 
