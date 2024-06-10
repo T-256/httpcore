@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 import httpcore
@@ -16,7 +18,10 @@ async def test_http11_connection():
         ]
     )
     async with httpcore.AsyncHTTP11Connection(
-        origin=origin, stream=stream, keepalive_expiry=5.0
+        origin=origin,
+        stream=stream,
+        keepalive_expiry=5.0,
+        socket_poll_interval_between=(0, 0),
     ) as conn:
         response = await conn.request("GET", "https://example.com/")
         assert response.status == 200
@@ -48,7 +53,9 @@ async def test_http11_connection_unread_response():
             b"Hello, world!",
         ]
     )
-    async with httpcore.AsyncHTTP11Connection(origin=origin, stream=stream) as conn:
+    async with httpcore.AsyncHTTP11Connection(
+        origin=origin, stream=stream, socket_poll_interval_between=(0, 0)
+    ) as conn:
         async with conn.stream("GET", "https://example.com/") as response:
             assert response.status == 200
 
@@ -70,7 +77,9 @@ async def test_http11_connection_with_remote_protocol_error():
     """
     origin = httpcore.Origin(b"https", b"example.com", 443)
     stream = httpcore.AsyncMockStream([b"Wait, this isn't valid HTTP!", b""])
-    async with httpcore.AsyncHTTP11Connection(origin=origin, stream=stream) as conn:
+    async with httpcore.AsyncHTTP11Connection(
+        origin=origin, stream=stream, socket_poll_interval_between=(0, 0)
+    ) as conn:
         with pytest.raises(httpcore.RemoteProtocolError):
             await conn.request("GET", "https://example.com/")
 
@@ -99,7 +108,9 @@ async def test_http11_connection_with_incomplete_response():
             b"Hello, wor",
         ]
     )
-    async with httpcore.AsyncHTTP11Connection(origin=origin, stream=stream) as conn:
+    async with httpcore.AsyncHTTP11Connection(
+        origin=origin, stream=stream, socket_poll_interval_between=(0, 0)
+    ) as conn:
         with pytest.raises(httpcore.RemoteProtocolError):
             await conn.request("GET", "https://example.com/")
 
@@ -129,7 +140,9 @@ async def test_http11_connection_with_local_protocol_error():
             b"Hello, world!",
         ]
     )
-    async with httpcore.AsyncHTTP11Connection(origin=origin, stream=stream) as conn:
+    async with httpcore.AsyncHTTP11Connection(
+        origin=origin, stream=stream, socket_poll_interval_between=(0, 0)
+    ) as conn:
         with pytest.raises(httpcore.LocalProtocolError) as exc_info:
             await conn.request("GET", "https://example.com/", headers={"Host": "\0"})
 
@@ -142,6 +155,48 @@ async def test_http11_connection_with_local_protocol_error():
         assert (
             repr(conn)
             == "<AsyncHTTP11Connection ['https://example.com:443', CLOSED, Request Count: 1]>"
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("should_check", [True, False])
+async def test_http11_has_expired_checks_readable_status_by_interval(
+    monkeypatch, should_check
+):
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = httpcore.AsyncMockStream(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: plain/text\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    async with httpcore.AsyncHTTP11Connection(
+        origin=origin,
+        stream=stream,
+        keepalive_expiry=5.0,
+        socket_poll_interval_between=(0, 0) if should_check else (999, 999),
+    ) as conn:
+        orig = conn._network_stream.get_extra_info
+        calls = []
+
+        def patch_get_extra_info(attr_name: str) -> Any:
+            calls.append(attr_name)
+            return orig(attr_name)
+
+        monkeypatch.setattr(
+            conn._network_stream, "get_extra_info", patch_get_extra_info
+        )
+
+        response = await conn.request("GET", "https://example.com/")
+        assert response.status == 200
+
+        assert "is_readable" not in calls
+        assert not conn.has_expired()
+        assert (
+            ("is_readable" in calls) if should_check else ("is_readable" not in calls)
         )
 
 
