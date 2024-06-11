@@ -71,7 +71,8 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
             our_role=h11.CLIENT,
             max_incomplete_event_size=self.MAX_INCOMPLETE_EVENT_SIZE,
         )
-        self._prev_socket_use_time = time.monotonic()
+        # Assuming we were just connected
+        self._network_stream_used_at = time.monotonic()
 
     async def handle_async_request(self, request: Request) -> Response:
         if not self.can_handle_request(request.url.origin):
@@ -177,7 +178,7 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
         bytes_to_send = self._h11_state.send(event)
         if bytes_to_send is not None:
             await self._network_stream.write(bytes_to_send, timeout=timeout)
-            self._prev_socket_use_time = time.monotonic()
+            self._network_stream_used_at = time.monotonic()
 
     # Receiving the response...
 
@@ -229,7 +230,7 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
                 data = await self._network_stream.read(
                     self.READ_NUM_BYTES, timeout=timeout
                 )
-                self._prev_socket_use_time = time.monotonic()
+                self._network_stream_used_at = time.monotonic()
 
                 # If we feed this case through h11 we'll raise an exception like:
                 #
@@ -294,15 +295,16 @@ class AsyncHTTP11Connection(AsyncConnectionInterface):
         # only valid state is that the socket is about to return b"", indicating
         # a server-initiated disconnect.
         # Checking the readable status is relatively expensive so check it at a lower frequency.
-        if (now - self._prev_socket_use_time) > self._socket_poll_interval():
-            self._prev_socket_use_time = now
+        if (now - self._network_stream_used_at) > self._socket_poll_interval():
+            self._network_stream_used_at = now
             server_disconnected = (
                 self._state == HTTPConnectionState.IDLE
                 and self._network_stream.get_extra_info("is_readable")
             )
-            return server_disconnected
-        else:
-            return False
+            if server_disconnected:
+                return True
+
+        return False
 
     def _socket_poll_interval(self) -> float:
         # Randomize to avoid polling for all the connections at once

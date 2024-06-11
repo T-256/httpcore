@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, List
 
 import pytest
 
@@ -156,6 +156,43 @@ def test_http11_connection_with_local_protocol_error():
             repr(conn)
             == "<HTTP11Connection ['https://example.com:443', CLOSED, Request Count: 1]>"
         )
+
+
+
+def test_http11_has_expired_checks_readable_status():
+    class MockStreamReadable(httpcore.MockStream):
+        def __init__(self, buffer: List[bytes]) -> None:
+            super().__init__(buffer)
+            self.is_readable = False
+            self.checks = 0
+
+        def get_extra_info(self, info: str) -> Any:
+            if info == "is_readable":
+                self.checks += 1
+                return self.is_readable
+            return super().get_extra_info(info)  # pragma: nocover
+
+    origin = httpcore.Origin(b"https", b"example.com", 443)
+    stream = MockStreamReadable(
+        [
+            b"HTTP/1.1 200 OK\r\n",
+            b"Content-Type: plain/text\r\n",
+            b"Content-Length: 13\r\n",
+            b"\r\n",
+            b"Hello, world!",
+        ]
+    )
+    with httpcore.HTTP11Connection(
+        origin=origin, stream=stream, socket_poll_interval_between=(0, 0)
+    ) as conn:
+        response = conn.request("GET", "https://example.com/")
+        assert response.status == 200
+
+        assert stream.checks == 0
+        assert not conn.has_expired()
+        stream.is_readable = True
+        assert conn.has_expired()
+        assert stream.checks == 2
 
 
 
