@@ -251,12 +251,12 @@ class ConnectionPool(RequestInterface):
                 self._connections.remove(connection)
                 closing_connections.append(connection)
             elif connection.is_idle():
-                if idling_count > self._max_keepalive_connections:
-                    # log: "closing idle connection"
-                    self._connections.remove(connection)
-                    closing_connections.append(connection)
-                else:
+                if idling_count < self._max_keepalive_connections:
                     idling_count += 1
+                    continue
+                # log: "closing idle connection"
+                self._connections.remove(connection)
+                closing_connections.append(connection)
 
         # Assign queued requests to connections.
         for pool_request in list(self._requests):
