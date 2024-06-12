@@ -3,9 +3,9 @@ name: Test Suite
 
 on:
   push:
-    branches: ["master"]
+    branches: ["master", "test-optimize"]
   pull_request:
-    branches: ["master"]
+    branches: ["master", "test-optimize"]
 
 jobs:
   tests:
